@@ -126,6 +126,9 @@ def labels_to_string(labels):
 
 
 def resolve_port_names(namespace, pod_label_selector, ports):
+    if ports is None:
+        return None
+
     api = k8s.client.CoreV1Api()
     for port in ports:
         if is_numerical_port(port.port):
