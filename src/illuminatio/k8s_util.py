@@ -131,8 +131,8 @@ def resolve_port_names(namespace, pod_label_selector, ports):
 
     api = k8s.client.CoreV1Api()
     for port in ports:
-        if is_numerical_port(port.port):
-            # Port is already numerical
+        if port.port is None or is_numerical_port(port.port):
+            # We do not need to resolve a name here
             continue
 
         pods = api.list_namespaced_pod(
