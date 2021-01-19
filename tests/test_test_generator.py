@@ -306,6 +306,83 @@ gen = NetworkTestCaseGenerator(logging.getLogger("test_test_generator"))
             ],
             id="Correctly handle portless NetworkPolicy",
         ),
+        pytest.param(
+            [k8s.client.V1Namespace(metadata=k8s.client.V1ObjectMeta(name="default"))],
+            [
+                k8s.client.V1NetworkPolicy(
+                    metadata=k8s.client.V1ObjectMeta(
+                        name="allow-named-port", namespace="default"
+                    ),
+                    spec=k8s.client.V1NetworkPolicySpec(
+                        pod_selector=k8s.client.V1LabelSelector(match_labels={
+                            "test.io/test-123_XYZ": "test_456-123.RECEIVER"
+                        }),
+                        ingress=[
+                            k8s.client.V1NetworkPolicyIngressRule(
+                                _from=[
+                                    k8s.client.V1NetworkPolicyPeer(
+                                        pod_selector=k8s.client.V1LabelSelector(
+                                            match_labels={
+                                                "test.io/test-123_XYZ": "test_456-123.SENDER"
+                                            }
+                                        )
+                                    )
+                                ],
+                                ports=[
+                                    k8s.client.V1NetworkPolicyPort(
+                                        port="mynamedport", protocol="TCP"
+                                    )
+                                ],
+                            )
+                        ],
+                    ),
+                )
+            ],
+            [
+                NetworkTestCase(
+                    ClusterHost(
+                        "default", {"test.io/test-123_XYZ": "test_456-123.ABC"}
+                    ),
+                    ClusterHost("default", {}),
+                    "*",
+                    True,
+                ),
+                NetworkTestCase(
+                    ClusterHost(
+                        "default",
+                        {
+                            INVERTED_ATTRIBUTE_PREFIX
+                            + "test.io/test-123_XYZ": "test_456-123.ABC"
+                        },
+                    ),
+                    ClusterHost("default", {}),
+                    "*",
+                    False,
+                ),
+                NetworkTestCase(
+                    ClusterHost(
+                        INVERTED_ATTRIBUTE_PREFIX + "default",
+                        {"test.io/test-123_XYZ": "test_456-123.ABC"},
+                    ),
+                    ClusterHost("default", {}),
+                    "*",
+                    False,
+                ),
+                NetworkTestCase(
+                    ClusterHost(
+                        INVERTED_ATTRIBUTE_PREFIX + "default",
+                        {
+                            INVERTED_ATTRIBUTE_PREFIX
+                            + "test.io/test-123_XYZ": "test_456-123.ABC"
+                        },
+                    ),
+                    ClusterHost("default", {}),
+                    "*",
+                    False,
+                ),
+            ],
+            id="Correctly handle NetworkPolicy with named Port",
+        ),
     ],
 )
 def test__generate_test_cases(namespaces, networkpolicies, expected_testcases):
