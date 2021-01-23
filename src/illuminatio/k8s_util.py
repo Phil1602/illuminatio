@@ -3,7 +3,7 @@ File with several useful functions for interacting with k8s
 """
 
 import kubernetes as k8s
-import logging as log
+import logging
 from illuminatio.host import Host
 from illuminatio.util import (
     CLEANUP_LABEL,
@@ -12,7 +12,6 @@ from illuminatio.util import (
     CLEANUP_ALWAYS,
     ROLE_LABEL,
 )
-
 
 def create_service_account_manifest_for_runners(name, namespace):
     """
@@ -125,35 +124,31 @@ def labels_to_string(labels):
     )
 
 
-def resolve_port_names(namespace, pod_label_selector, ports):
-    if ports is None:
-        return None
-
+def resolve_port_name(namespace, pod_label_selector_string, portname):
     api = k8s.client.CoreV1Api()
-    for port in ports:
-        if port.port is None or is_numerical_port(port.port):
-            # We do not need to resolve a name here
-            continue
 
-        pods = api.list_namespaced_pod(
-            namespace=namespace, label_selector=labels_to_string(pod_label_selector)
+    pods = api.list_namespaced_pod(
+        namespace=namespace, label_selector=pod_label_selector_string
+    )
+
+    numerical_port = resolve_port_from_candidates(pods, portname)
+    if numerical_port is None:
+        # TODO Evaluate how we could handle this properly
+        # e.g. Warning and ignore the whole port or policy if this is the only port?
+        logging.fatal(
+            f"Could not find port number for port {portname}. "
+            f"Have you specified the correct port name within the NetworkPolicy in namespace {namespace}?"
         )
 
-        numerical_port = resolve_port_from_candidates(pods, port.port)
-        if numerical_port is None:
-            # TODO Evaluate how we could handle this properly
-            # e.g. Warning and ignore the whole port or policy if this is the only port?
-            log.fatal(
-                f"Could not find port number for port {port}. "
-                f"Have you specified the correct port name within the NetworkPolicy in namespace {namespace}?"
-            )
-        port.port = numerical_port
-    return ports
+    return numerical_port
 
 
 def resolve_port_from_candidates(pods, portname):
     for pod in pods.items:
         for container in pod.spec.containers:
+            if container.ports is None:
+                logging.debug(f"No ports specified for {pod.metadata.name}")
+                continue
             for container_port_spec in container.ports:
                 if container_port_spec.name == portname:
                     return container_port_spec.container_port

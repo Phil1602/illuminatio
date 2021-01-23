@@ -17,6 +17,8 @@ from illuminatio.k8s_util import (
     create_service_manifest,
     labels_to_string,
     update_role_binding_manifest,
+    is_numerical_port,
+    resolve_port_name
 )
 from illuminatio.test_case import merge_in_dict
 from illuminatio.util import (
@@ -41,8 +43,8 @@ def get_container_runtime():
         ].status.node_info.container_runtime_version
         for node in node_list.items:
             if (
-                node.status.node_info.container_runtime_version
-                != container_runtime_name
+                    node.status.node_info.container_runtime_version
+                    != container_runtime_name
             ):
                 raise ValueError(
                     "Different container runtime versions found on your nodes"
@@ -72,6 +74,7 @@ class NetworkTestOrchestrator:
         self.current_namespaces = []
         self.runner_daemon_set = None
         self.oci_images = {}
+        self.portname_cache = {}
         self.logger = log
 
     def set_runner_image(self, runner_image):
@@ -171,7 +174,7 @@ class NetworkTestOrchestrator:
             self.logger.error(api_exception)
             exit(1)
 
-    def _rewrite_ports_for_host(self, port_list, services_for_host):
+    def _rewrite_ports_for_host(self, host_string, port_list, services_for_host):
         self.logger.debug("Rewriting portList %s", port_list)
         if not services_for_host:
             # assign random port, a service with matching port will be created
@@ -181,9 +184,12 @@ class NetworkTestOrchestrator:
             }
         rewritten_ports = {}
         wild_card_ports = {p for p in port_list if "*" in p}
-        numbered_ports = {p for p in port_list if "*" not in p}
+        numbered_ports = {p for p in port_list if is_numerical_port(p)}
+        # We assume that the other ports are named_ports
+        named_ports = set(port_list) - set(numbered_ports) - set(wild_card_ports)
         service_ports = [p for svc in services_for_host for p in svc.spec.ports]
         self.logger.debug("Svc ports: %s", service_ports)
+
         for wildcard_port in wild_card_ports:
             prefix = "-" if "-" in wildcard_port else ""
             # choose any port for wildcard
@@ -191,10 +197,12 @@ class NetworkTestOrchestrator:
                 prefix,
                 str(service_ports[0].port),
             )
+
         for port in numbered_ports:
             prefix = "-" if "-" in port else ""
             port_int = int(port.replace("-", ""))
             service_ports_for_port = [
+                # TODO Services could also contain named ports. We should cross-compare here (resvoledName == numerical)
                 p for p in service_ports if p.target_port == port_int
             ]
             # TODO this was a hotfix for recipe 11, where ports 53 were allowed but not for any target,
@@ -208,10 +216,32 @@ class NetworkTestOrchestrator:
             else:
                 # TODO change to exception, handle it higher up
                 rewritten_ports[port] = "err"
+
+        for named_port in named_ports:
+            host_string_separated = str(host_string).split(":")
+            namespace = host_string_separated[0]
+            label_selector_string = host_string_separated[1] if host_string_separated[1] != "*" else ""
+
+            # Strip of the "-" and add it again after name has been resolved
+            prefix = "-" if "-" in named_port else ""
+            port_without_prefix = named_port.replace("-", "")
+
+            # We use a simple cache to avoid looking up the same pod-port combination twice for another test case
+            key_hostname_port = f"{host_string}_{named_port}"
+            if key_hostname_port not in self.portname_cache:
+                self.portname_cache[key_hostname_port] = resolve_port_name(
+                    namespace, label_selector_string, port_without_prefix
+                )
+
+            rewritten_ports[named_port] = "%s%d" % (
+                    prefix,
+                    self.portname_cache[key_hostname_port],
+                )
+
         return rewritten_ports
 
     def _get_target_names_creating_them_if_missing(
-        self, target_dict, api: k8s.client.CoreV1Api
+            self, target_dict, api: k8s.client.CoreV1Api
     ):
         service_names_per_host = {}
         port_dict_per_host = {}
@@ -238,9 +268,9 @@ class NetworkTestOrchestrator:
                 [svc.metadata for svc in services_for_host],
                 host,
             )
-            rewritten_ports = self._rewrite_ports_for_host(
-                target_dict[host_string], services_for_host
-            )
+            rewritten_ports = self._rewrite_ports_for_host(host_string,
+                                                           target_dict[host_string], services_for_host
+                                                           )
             self.logger.debug("Rewritten ports: %s", rewritten_ports)
             port_dict_per_host[host_string] = rewritten_ports
             if not services_for_host:
@@ -274,7 +304,7 @@ class NetworkTestOrchestrator:
                 )
                 if isinstance(resp, k8s.client.V1Pod):
                     self.logger.debug(
-                        "Target pod %s created succesfully", resp.metadata.name
+                        "Target pod %s created successfully", resp.metadata.name
                     )
                     self._current_pods.append(resp)
                 else:
@@ -283,7 +313,7 @@ class NetworkTestOrchestrator:
                 if isinstance(resp, k8s.client.V1Service):
                     service_names_per_host[host_string] = resp.spec.cluster_ip
                     self.logger.debug(
-                        "Target svc %s created succesfully", resp.metadata.name
+                        "Target svc %s created successfully", resp.metadata.name
                     )
                     self._current_services.append(resp)
                 else:
@@ -295,7 +325,7 @@ class NetworkTestOrchestrator:
         return service_names_per_host, port_dict_per_host
 
     def _find_or_create_cluster_resources_for_cases(
-        self, cases_dict, api: k8s.client.CoreV1Api
+            self, cases_dict, api: k8s.client.CoreV1Api
     ):
         resolved_cases = {}
         from_host_mappings = {}
@@ -335,7 +365,7 @@ class NetworkTestOrchestrator:
                 resp = api.create_namespaced_pod(dummy.metadata.namespace, dummy)
                 if isinstance(resp, k8s.client.V1Pod):
                     self.logger.debug(
-                        "Dummy pod %s created succesfully", resp.metadata.name
+                        "Dummy pod %s created successfully", resp.metadata.name
                     )
                     pods_for_host = [resp]
                     self._current_pods.append(resp)
@@ -429,11 +459,11 @@ class NetworkTestOrchestrator:
         return from_host_mappings, to_host_mappings, port_mappings, config_map_name
 
     def ensure_daemonset_is_ready(
-        self,
-        config_map_name: str,
-        apps_api: k8s.client.AppsV1Api,
-        core_api: k8s.client.CoreV1Api,
-        cri_socket: str,
+            self,
+            config_map_name: str,
+            apps_api: k8s.client.AppsV1Api,
+            core_api: k8s.client.CoreV1Api,
+            cri_socket: str,
     ):
         """
         Ensures that all required resources for illuminatio are created
@@ -510,12 +540,12 @@ class NetworkTestOrchestrator:
         return {k: v for yam in [y.items() for y in yamls] for k, v in yam}, times
 
     def create_daemonset_manifest(
-        self,
-        daemon_set_name: str,
-        service_account_name: str,
-        config_map_name: str,
-        container_runtime: str,
-        cri_socket: str,
+            self,
+            daemon_set_name: str,
+            service_account_name: str,
+            config_map_name: str,
+            container_runtime: str,
+            cri_socket: str,
     ):
         """
         Creates a DaemonSet manifest on basis of the project's manifest files and the current
@@ -563,12 +593,12 @@ class NetworkTestOrchestrator:
             self.logger.error(api_exception)
 
     def _ensure_daemonset_exists(
-        self,
-        daemonset_name: str,
-        service_account_name: str,
-        config_map_name: str,
-        api: k8s.client.AppsV1Api,
-        cri_socket: str,
+            self,
+            daemonset_name: str,
+            service_account_name: str,
+            config_map_name: str,
+            api: k8s.client.AppsV1Api,
+            cri_socket: str,
     ):
         # Use a Kubernetes Manifest as template and replace required parts
         try:
@@ -614,7 +644,7 @@ class NetworkTestOrchestrator:
             tries += 1
 
     def _create_or_update_case_config_map(
-        self, config_map_name, cases_dict, api: k8s.client.CoreV1Api
+            self, config_map_name, cases_dict, api: k8s.client.CoreV1Api
     ):
         cfg_map_meta = k8s.client.V1ObjectMeta(
             namespace=PROJECT_NAMESPACE,
@@ -702,7 +732,7 @@ class NetworkTestOrchestrator:
                 resp = api.create_namespaced_service_account(namespace, service_account)
                 if isinstance(resp, k8s.client.V1ServiceAccount):
                     self.logger.debug(
-                        "Succesfully created ServiceAccount for namespace %s", namespace
+                        "Successfully created ServiceAccount for namespace %s", namespace
                     )
                 else:
                     self.logger.error(

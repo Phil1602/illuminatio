@@ -3,7 +3,6 @@ File for the creation of networking rules
 """
 from collections import namedtuple
 import kubernetes as k8s
-from illuminatio.k8s_util import resolve_port_names
 
 # identifiers:
 POD_SELECTOR_LABELS = "podLabels"
@@ -96,17 +95,11 @@ class Rule:
         allowed = []
         if net_pol.spec.ingress is not None:
             for ing in net_pol.spec.ingress:
-                numbered_ports = resolve_port_names(
-                    net_pol.metadata.namespace,
-                    net_pol.spec.pod_selector.match_labels,
-                    ing.ports,
-                )
                 allowed.extend(
-                    build_connections(DIRECTION_INCOMING, ing._from, numbered_ports)
+                    build_connections(DIRECTION_INCOMING, ing._from, ing.ports)
                 )
         if net_pol.spec.egress is not None:
             for egr in net_pol.spec.egress:
-                # TODO check whether it is possible to define egress port names
                 allowed.extend(build_connections(DIRECTION_OUTGOING, egr.to, egr.ports))
         # return as object
         return cls(concerns, allowed)
