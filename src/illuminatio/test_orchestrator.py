@@ -391,6 +391,8 @@ class NetworkTestOrchestrator:
             resolved_cases[pod_identifier] = {
                 names_per_host[t]: [port_names_per_host[t][p] for p in target_dict[t]]
                 for t in target_dict
+                # TODO This is just a sanity check to not add "None" ipaddresses. The root cause therefore has not been found yet.
+                if names_per_host[t] != "None"
             }
         return resolved_cases, from_host_mappings, to_host_mappings, port_mappings
 
